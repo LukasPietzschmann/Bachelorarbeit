@@ -174,14 +174,11 @@ void insert_into(Value* destination, bool value, const std::string name, Args...
 }
 std::string operator"" _uniq(const char* str, size_t size) { return utils::mkuniq(str); }
 
+namespace predef_globals {
+Value* unique();
+}
 namespace flx_value {
 enum Flags { nat = 1 << 0, synt = 1 << 1, nil = 1 << 2 };
-
-int32_t unique() {
-	// Darf nicht bei 0 anfangen, da ein synthetischer Wert nicht als false zu interpretieren ist
-	static int32_t next_unique = 1;
-	return next_unique++;
-}
 
 Value* is(Value* value, Flags flag) {
 	assert(value->getType()->isIntegerTy(FLX_VALUE_WIDTH));
@@ -254,23 +251,78 @@ Value* exec_if(std::function<Value*()> check, std::function<Value*()> check_true
 
 	return phi;
 }
+
+Value* unique_synt() {
+	Value* unique =
+			ir_builder->CreateLoad(utils::get_integer_type(FLX_VALUE_WIDTH), predef_globals::unique(), "synt"_uniq);
+	Value* next_unique =
+			ir_builder->CreateAdd(flx_value::truncate_to_raw_value(unique), utils::get_integer_constant(1));
+	ir_builder->CreateStore(flx_value::promote_to_flx_value(next_unique, flx_value::synt), predef_globals::unique());
+	return unique;
+}
 }
 
 namespace predef_function_names {
 static const std::string& main = "main";
 static const std::string& print = "printf";
+static const std::string& sprint = "sprintf";
 static const std::string& scan = "scanf";
 static const std::string& pow = "pow";
 static const std::string& fac = "fac";
+static const std::string& init_map = "init_map";
+static const std::string& destroy_map = "destroy_map";
+static const std::string& search = "search";
+static const std::string& enter = "enter";
+static const std::string& malloc = "malloc";
+static const std::string& strcat = "strcat";
 }
 
 namespace predef_structure_names {
 static const std::string& bracket = "bracket";
+static const std::string& hsearch_entry = "entry";
 }
 
 namespace predef_global_names {
 static const std::string& nil = "nil";
 static const std::string& trueval = "trueval";
+static const std::string& unique = "next.unique";
+}
+
+namespace predef_structures {
+StructType* bracket() {
+	static StructType* bracket = nullptr;
+	if(bracket != nullptr)
+		return bracket;
+
+	bracket = StructType::create(llvm_module->getContext(), predef_structure_names::bracket);
+	// i32*: Gewählte Option pro Durchlauf (Alle)
+	// i32: Anzahl der Durchläufe (Wiederholung)
+	// i1: Wurde eine Option gewählt (Option)
+	// bracket***: Liste an Klammern aus jedem Durchläufe (Alle)
+	std::vector<llvm::Type*> bracket_elements = {utils::get_ptr_type(utils::get_integer_type()),
+			utils::get_integer_type(),
+			utils::get_integer_type(BOOL_WIDTH),
+			utils::get_ptr_type(bracket, 3)};
+	bracket->setBody(bracket_elements);
+
+	return bracket;
+}
+
+StructType* hsearch_entry() {
+	static StructType* hsearch_entry = nullptr;
+	if(hsearch_entry != nullptr)
+		return hsearch_entry;
+
+	hsearch_entry = StructType::create(llvm_module->getContext(), predef_structure_names::hsearch_entry);
+	// i8*: key
+	// i35*: data (Eigentlich void*, aber da hier keine anderen Werte gespeichert werden, wird der Typ hier so explizit
+	// angegeben)
+	std::vector<llvm::Type*> bracket_elements = {utils::get_ptr_type(utils::get_integer_type(8)),
+			utils::get_ptr_type(utils::get_integer_type(FLX_VALUE_WIDTH))};
+	hsearch_entry->setBody(bracket_elements);
+
+	return hsearch_entry;
+}
 }
 
 namespace predef_functions {
@@ -299,6 +351,20 @@ Function* printf() {
 			llvm_module);
 	printf->setCallingConv(CallingConv::C);
 	return printf;
+}
+
+Function* sprintf() {
+	if(Function* sprintf_function = llvm_module->getFunction(predef_function_names::sprint))
+		return sprintf_function;
+
+	std::vector<llvm::Type*> sprintf_args(2, utils::get_integer_ptr_type(CHARACTER_WIDTH));
+	FunctionType* sprintf_function_type = FunctionType::get(utils::get_integer_type(), sprintf_args, true);
+	Function* sprintf = Function::Create(sprintf_function_type,
+			Function::ExternalLinkage,
+			predef_function_names::sprint,
+			llvm_module);
+	sprintf->setCallingConv(CallingConv::C);
+	return sprintf;
 }
 
 Function* scanf() {
@@ -408,26 +474,90 @@ Function* fac() {
 
 	return fac_function;
 }
+
+Function* init_map() {
+	if(Function* init_function = llvm_module->getFunction(predef_function_names::init_map))
+		return init_function;
+
+	FunctionType* init_function_type = FunctionType::get(llvm::Type::getVoidTy(llvm_module->getContext()), false);
+	Function* init_function = Function::Create(init_function_type,
+			Function::ExternalLinkage,
+			predef_function_names::init_map,
+			llvm_module);
+	init_function->setCallingConv(CallingConv::C);
+	return init_function;
 }
 
-namespace predef_structures {
-StructType* bracket() {
-	static StructType* bracket = nullptr;
-	if(bracket != nullptr)
-		return bracket;
+Function* destory_map() {
+	if(Function* destroy_function = llvm_module->getFunction(predef_function_names::destroy_map))
+		return destroy_function;
 
-	bracket = StructType::create(llvm_module->getContext(), predef_structure_names::bracket);
-	// i32*: Gewählte Option pro Durchlauf (Alle)
-	// i32: Anzahl der Durchläufe (Wiederholung)
-	// i1: Wurde eine Option gewählt (Option)
-	// bracket***: Liste an Klammern aus jedem Durchläufe (Alle)
-	std::vector<llvm::Type*> bracket_elements = {utils::get_ptr_type(utils::get_integer_type()),
-			utils::get_integer_type(),
-			utils::get_integer_type(BOOL_WIDTH),
-			utils::get_ptr_type(bracket, 3)};
-	bracket->setBody(bracket_elements);
+	FunctionType* destory_function_type = FunctionType::get(llvm::Type::getVoidTy(llvm_module->getContext()), false);
+	Function* destroy_function = Function::Create(destory_function_type,
+			Function::ExternalLinkage,
+			predef_function_names::destroy_map,
+			llvm_module);
+	destroy_function->setCallingConv(CallingConv::C);
+	return destroy_function;
+}
 
-	return bracket;
+Function* search() {
+	if(Function* search_function = llvm_module->getFunction(predef_function_names::search))
+		return search_function;
+
+	std::vector<llvm::Type*> search_args = {utils::get_integer_ptr_type(CHARACTER_WIDTH)};
+	FunctionType* search_function_type =
+			FunctionType::get(utils::get_ptr_type(predef_structures::hsearch_entry()), search_args, false);
+	Function* search_function = Function::Create(search_function_type,
+			Function::ExternalLinkage,
+			predef_function_names::search,
+			llvm_module);
+	search_function->setCallingConv(CallingConv::C);
+	return search_function;
+}
+
+Function* enter() {
+	if(Function* enter_function = llvm_module->getFunction(predef_function_names::enter))
+		return enter_function;
+
+	std::vector<llvm::Type*> enter_args = {utils::get_integer_ptr_type(CHARACTER_WIDTH),
+			PointerType::get(llvm_module->getContext(), DEFAULT_ADDRESS_SPACE)};
+	FunctionType* enter_function_type =
+			FunctionType::get(llvm::Type::getVoidTy(llvm_module->getContext()), enter_args, false);
+	Function* enter_function =
+			Function::Create(enter_function_type, Function::ExternalLinkage, predef_function_names::enter, llvm_module);
+	enter_function->setCallingConv(CallingConv::C);
+	return enter_function;
+}
+
+Function* malloc() {
+	if(Function* malloc_function = llvm_module->getFunction(predef_function_names::malloc))
+		return malloc_function;
+
+	std::vector<llvm::Type*> malloc_args = {utils::get_integer_type()};
+	FunctionType* malloc_function_type =
+			FunctionType::get(PointerType::get(llvm_module->getContext(), DEFAULT_ADDRESS_SPACE), malloc_args, false);
+	Function* malloc = Function::Create(malloc_function_type,
+			Function::ExternalLinkage,
+			predef_function_names::malloc,
+			llvm_module);
+	malloc->setCallingConv(CallingConv::C);
+	return malloc;
+}
+
+Function* strcat() {
+	if(Function* str_cat_function = llvm_module->getFunction(predef_function_names::strcat))
+		return str_cat_function;
+
+	std::vector<llvm::Type*> strcat_args(2, utils::get_integer_ptr_type(CHARACTER_WIDTH));
+	FunctionType* str_cat_function_type =
+			FunctionType::get(utils::get_integer_ptr_type(CHARACTER_WIDTH), strcat_args, false);
+	Function* str_cat = Function::Create(str_cat_function_type,
+			Function::ExternalLinkage,
+			predef_function_names::strcat,
+			llvm_module);
+	str_cat->setCallingConv(CallingConv::C);
+	return str_cat;
 }
 }
 
@@ -450,8 +580,21 @@ Value* trueval() {
 			utils::get_integer_type(FLX_VALUE_WIDTH),
 			true,
 			GlobalValue::PrivateLinkage,
-			flx_value::get(flx_value::synt, flx_value::unique()),
+			flx_value::get(flx_value::synt, 1),
 			predef_global_names::trueval);
+}
+
+Value* unique() {
+	if(GlobalVariable* unique = llvm_module->getNamedGlobal(predef_global_names::unique); unique != nullptr)
+		return unique;
+	return new GlobalVariable(*llvm_module,
+			utils::get_integer_type(FLX_VALUE_WIDTH),
+			false,
+			GlobalValue::PrivateLinkage,
+			// Darf nicht bei 0 anfangen, da ein synthetischer Wert nicht als false zu interpretieren ist
+			// Muss bei 2 anfangen, da die 1 von trueval verwendet wird
+			flx_value::get(flx_value::synt, 2),
+			predef_global_names::unique);
 }
 }
 
@@ -504,7 +647,7 @@ struct ContextRun {
 	std::vector<ContextBracket> brackets;
 };
 
-std::map<std::string, Expr> available_functions_to_instantiate;
+std::map<std::string, std::pair<bool, Expr>> available_functions_to_instantiate;
 std::vector<ContextBracket>* cbrackets;
 
 Function* instantiate_function(const std::string& static_function_name,
@@ -512,7 +655,8 @@ Function* instantiate_function(const std::string& static_function_name,
 		std::vector<ContextBracket>& out_cbrackets) {
 	const auto& it = available_functions_to_instantiate.find(static_function_name);
 	assert(it != available_functions_to_instantiate.end());
-	Expr expr = it->second;
+	Expr expr = it->second.second;
+	bool is_static = it->second.first;
 
 	std::vector<llvm::Type*> oper_params;
 	std::vector<std::string> oper_params_names;
@@ -583,6 +727,9 @@ Function* instantiate_function(const std::string& static_function_name,
 		current_crun = &current_cbracket->runs.emplace_back(current_arun->selected_option, ascend_in_contexts, parent);
 	};
 
+	// Hier werden alle geleseen Namen des Operators eingetragen, um mit diesen später (Im Falle eines statischen
+	// Operators) einen eindeutigen Key zu erstellen
+	std::stringstream names;
 	enum { name, parameter, alternative, option, repetition };
 	std::function<void(CH::seq<Pass>, ValueContext::Ptr)> gen_function_signatur =
 			[&](CH::seq<Pass> passes, ValueContext::Ptr parent_context) {
@@ -598,7 +745,11 @@ Function* instantiate_function(const std::string& static_function_name,
 
 					std::stringstream parameter_name;
 					switch(pass(choice_) - CH::A) {
-						case name: break;
+						case name: {
+							if(!is_static)
+								break;
+							names << pass(branch_)[CH::A](word_);
+						} break;
 						case parameter: {
 							dynamic_function_name << "p";
 							parameter_name << pass(branch_)[CH::A + 1](passes_)[CH::A](branch_)[CH::A](passes_)[CH::A](
@@ -745,10 +896,10 @@ Function* instantiate_function(const std::string& static_function_name,
 		vector<ContextBracket> cbracket_copy = cbrackets;
 		ValueContext::Ptr encl_run = top_level_param_context;
 		ValueContext::Ptr encl_voar = top_level_param_context;
-		// Variablen aus Kontexten von eckigen Klammern mit nur einer Alternative werden in ihren umschließenden Kontext
-		// verschoben.
-		// Diese Änderung wird nach dem Generieren der Implementierung wieder rückgängig gemacht, da sie in appl_gen für
-		// das Erzeugen der Argumente nicht von Bedeutung ist und so unnötige Komplexität vermieden werden kann :)
+		// Variablen aus Kontexten von eckigen Klammern mit nur einer Alternative werden in ihren umschließenden
+		// Kontext verschoben. Diese Änderung wird nach dem Generieren der Implementierung wieder rückgängig
+		// gemacht, da sie in appl_gen für das Erzeugen der Argumente nicht von Bedeutung ist und so unnötige
+		// Komplexität vermieden werden kann :)
 		std::function<void(std::vector<ContextBracket>&)> ascend_contexts =
 				[&](std::vector<ContextBracket>& cbrackets) {
 					for(ContextBracket& bracket : cbrackets) {
@@ -795,8 +946,110 @@ Function* instantiate_function(const std::string& static_function_name,
 					};
 			create_allocas_for_values_over_runs(cbrackets);
 
-			Value* res = gen_expr_code_internal(expr(row_)[CH::A + 4](passes_)[CH::A](branch_)[CH::A + 1](opnd_));
-			ir_builder->CreateRet(res);
+			if(is_static) {
+				BasicBlock* check_bb = BasicBlock::Create(llvm_module->getContext(), "check.present"_uniq);
+				BasicBlock* does_not_exist_bb = BasicBlock::Create(llvm_module->getContext(), "not.present"_uniq);
+				BasicBlock* does_exist = BasicBlock::Create(llvm_module->getContext(), "present"_uniq);
+
+				Value* found_element;
+				Value* stack_key;
+				Value* actual_stack_key_len_v;
+
+				static const int max_param_len = std::ceil(std::log10(std::pow(2, FLX_VALUE_WIDTH))) + 1;
+				const int max_stack_key_len = oper_params.size() * max_param_len + names.str().size() + 1;
+
+				// Alle Parameter-Werte so miteinander verknüpfen, dass ein eindeutiger Integer entsteht
+				ir_builder->CreateBr(check_bb);
+				oper_function->getBasicBlockList().push_back(check_bb);
+				utils::generate_on_basic_block(check_bb, [&]() {
+					// Hier kann der String auf den Stack angelegt werden, da search seine Adresse nicht speichern wird
+					stack_key = ir_builder->CreateAlloca(ArrayType::get(utils::get_integer_type(CHARACTER_WIDTH), max_stack_key_len), nullptr, "stack.key"_uniq);
+					utils::insert_into(stack_key, utils::get_integer_constant('\0', CHARACTER_WIDTH), "", 0,0);
+
+					actual_stack_key_len_v = ir_builder->CreateAlloca(utils::get_integer_type());
+					ir_builder->CreateStore(utils::get_integer_constant(names.str().size()), actual_stack_key_len_v);
+
+					std::function<void(const std::vector<ContextBracket>&)> create_static_oper_id =
+						[&](const std::vector<ContextBracket> cbrackets) {
+							for(const ContextBracket& cbracket : cbrackets) {
+								for(const ContextRun& run : cbracket.runs) {
+									for(const auto& [_, value] : run.variables->named_values) {
+										Value* param_value = ir_builder->CreateLoad(utils::get_integer_type(FLX_VALUE_WIDTH), value.value);
+										param_value = ir_builder->CreateZExt(param_value, utils::get_integer_type(STATIC_OPER_ID_WIDTH));
+
+										Value* temp = ir_builder->CreateAlloca(ArrayType::get(utils::get_integer_type(CHARACTER_WIDTH), max_param_len));
+										Value* param_str_len = ir_builder->CreateCall(predef_functions::sprintf(), {temp, utils::construct_string("%ld|"), param_value});
+										Value* new_key_len = ir_builder->CreateLoad(utils::get_integer_type(), actual_stack_key_len_v);
+										new_key_len = ir_builder->CreateAdd(new_key_len, param_str_len);
+										ir_builder->CreateStore(new_key_len, actual_stack_key_len_v);
+
+										ir_builder->CreateCall(predef_functions::strcat(), {stack_key, temp});
+									}
+									create_static_oper_id(run.brackets);
+								}
+							}
+						};
+					create_static_oper_id(cbrackets);
+					ir_builder->CreateCall(predef_functions::strcat(), {stack_key, utils::construct_string(names.str())});
+
+#ifdef RUNTIME_DEBUG_OUTPUT
+					ir_builder->CreateCall(predef_functions::printf(), {utils::construct_string("Static oper id: \"%s\"\n"), stack_key});
+#endif
+					found_element = ir_builder->CreateCall(predef_functions::search(), stack_key);
+					Value* found_something = ir_builder->CreateICmpNE(found_element, ConstantPointerNull::get(utils::get_ptr_type(predef_structures::hsearch_entry())));
+
+					ir_builder->CreateCondBr(found_something, does_exist, does_not_exist_bb);
+				});
+
+				oper_function->getBasicBlockList().push_back(does_not_exist_bb);
+				utils::generate_on_basic_block(does_not_exist_bb, [&](){
+					// Implementierung generieren und am Schluss das Resultat dieser in die Map einfügen.
+					// Dieser Block wird nur ausgeführt, wenn oben kein Eintrag gefunden wurde, also muss hier immer am Ende
+					// ein neuer Eintrag erstellt werden.
+					Value* oper_result;
+					if(expr(row_)[CH::A + 4](passes_)[CH::A](branch_)[CH::A + 1](opnd_) == CH::nil)
+						oper_result = flx_value::unique_synt();
+					else
+						oper_result = gen_expr_code_internal(expr(row_)[CH::A + 4](passes_)[CH::A](branch_)[CH::A + 1](opnd_));
+
+					// Hier müssen key und data auf den Heap angelegt werden, da enter deren Adressen speichern wird
+					Value* oper_result_ptr = ir_builder->CreateCall(predef_functions::malloc(), utils::get_integer_constant(std::ceil((float)(FLX_VALUE_WIDTH) / 8)));
+					ir_builder->CreateStore(oper_result, oper_result_ptr);
+
+					actual_stack_key_len_v = ir_builder->CreateLoad(utils::get_integer_type(), actual_stack_key_len_v);
+					actual_stack_key_len_v = ir_builder->CreateAdd(actual_stack_key_len_v, utils::get_integer_constant(1)); // null-byte
+					Value* heap_key = ir_builder->CreateCall(predef_functions::malloc(), actual_stack_key_len_v, "heap.key"_uniq);
+					// https://llvm.org/docs/LangRef.html#llvm-memcpy-intrinsic
+					std::vector<llvm::Type*> intrinsic_specialisation {
+						PointerType::get(llvm_module->getContext(), DEFAULT_ADDRESS_SPACE),
+						PointerType::get(llvm_module->getContext(), DEFAULT_ADDRESS_SPACE),
+						utils::get_integer_type(32)
+					};
+					// Daten aus dem stack in den heap kopieren
+					ir_builder->CreateCall(Intrinsic::getDeclaration(llvm_module, Intrinsic::memcpy, intrinsic_specialisation), {heap_key, stack_key, actual_stack_key_len_v});
+
+					// Key und date in die map einfügen
+					ir_builder->CreateCall(predef_functions::enter(), {heap_key, oper_result_ptr});
+
+					ir_builder->CreateRet(oper_result);
+				});
+
+				oper_function->getBasicBlockList().push_back(does_exist);
+				utils::generate_on_basic_block(does_exist, [&](){
+					// Dieser Block wird nur ausgeführt, wenn oben ein Eintrag gefunden wurde
+					Value* map_result = utils::extract_from_i(found_element, "", 0, 1);
+					map_result = ir_builder->CreateLoad(utils::get_integer_type(FLX_VALUE_WIDTH), map_result);
+
+					ir_builder->CreateRet(map_result);
+				});
+			} else {
+				if(expr(row_)[CH::A + 4](passes_)[CH::A](branch_)[CH::A + 1](opnd_) == CH::nil)
+					ir_builder->CreateRet(flx_value::unique_synt());
+				else {
+					Value* res = gen_expr_code_internal(expr(row_)[CH::A + 4](passes_)[CH::A](branch_)[CH::A + 1](opnd_));
+					ir_builder->CreateRet(res);
+				}
+			}
 		}, true);
 		// clang-format on
 
@@ -930,7 +1183,9 @@ int gen_expr_code(Expr expr,
 	BasicBlock* main_entry = BasicBlock::Create(llvm_module->getContext());
 	predef_functions::main()->getBasicBlockList().push_back(main_entry);
 	utils::generate_on_basic_block(main_entry, [&expr]() {
+		ir_builder->CreateCall(predef_functions::init_map());
 		Value* res = gen_expr_code_internal(expr);
+		ir_builder->CreateCall(predef_functions::destory_map());
 		ir_builder->CreateRet(flx_value::truncate_to_raw_value(res));
 	});
 
@@ -989,7 +1244,7 @@ Value* cdecl_gen(Expr expr) {
 	if(Expr initializer = oper(init_))
 		result = gen_expr_code_internal(initializer);
 	else
-		result = flx_value::get(flx_value::synt, flx_value::unique());
+		result = flx_value::unique_synt();
 
 	std::stringstream name;
 	name << expr(row_)[CH::A](passes_)[CH::A](branch_)[CH::A](word_);
@@ -1010,7 +1265,7 @@ Value* cdecl_gen(Expr expr) {
 	Value* store = ir_builder->CreateStore(result, variable);
 	current_context->named_values.try_emplace(name.str(), variable);
 
-	return store;
+	return result;
 }
 
 Value* logic_gen(Expr expr) {
@@ -1409,7 +1664,7 @@ Value* const_gen(Expr expr) {
 }
 
 Value* odecl_gen(Expr expr) {
-	assert(!expr(expt_)(opers_)[CH::A](orig_)(stat_) && "Statische Operatoren werden aktuell nicht unterstützt!");
+	bool is_static = expr(expt_)(opers_)[CH::A](orig_)(stat_);
 	const std::function<std::stringstream(Expr)> gen_function_name = [&](Expr expr) -> std::stringstream {
 		static int level = -1;
 		++level;
@@ -1432,7 +1687,7 @@ Value* odecl_gen(Expr expr) {
 	if(settings_flags & READABLE_FUNCTION_NAMES)
 		name = gen_function_name(expr);
 	name << (void*)expr(expt_)(opers_)[CH::A](orig_).id;
-	func_utils::available_functions_to_instantiate.emplace(name.str(), expr);
+	func_utils::available_functions_to_instantiate.try_emplace(name.str(), is_static, expr);
 
 	return flx_value::get(flx_value::nil);
 }
